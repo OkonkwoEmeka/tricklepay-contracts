@@ -231,6 +231,47 @@ When `create_stream` has several invalid arguments at once, it reports only the
 first failing check, in the order documented on `create_stream` in
 [`contract.rs`](contracts/stream/src/contract.rs): participants, then amount,
 then schedule, then capacity.
+
+## Storage lifetime
+
+Soroban storage entries expire unless their time to live (TTL) is extended.
+Once an entry's TTL runs out the network archives it, and it must be restored
+off-contract before any call can read it again. The contract sets two
+constants in [`storage.rs`](contracts/stream/src/storage.rs) that decide how
+long a stream survives without interaction:
+
+| Constant         | Ledgers   | Approx. time at 5 s/ledger | Role                                                    |
+| ---------------- | --------- | -------------------------- | ------------------------------------------------------- |
+| `ENTRY_TTL`      | `518_400` | 30 days                    | the lifetime an entry is extended to                    |
+| `BUMP_THRESHOLD` | `103_680` | 6 days                     | extend only when fewer than this many ledgers remain    |
+
+`ENTRY_TTL` is thirty days expressed in ledgers
+(`30 * 86_400 / 5 = 518_400`), long enough to cover a monthly payroll or
+subscription cycle. `BUMP_THRESHOLD` is one fifth of that. An access with more
+than six days left does not extend the entry, which saves the fee of
+re-extending on every call. An access with less than six days left resets the
+entry to the full thirty days.
+
+What this means in practice:
+
+- **Stream records** (`Stream(id)`, persistent storage) are extended whenever
+  any entry point reads or writes them, including the read-only views such as
+  `withdrawable`, `vested`, and `get_stream`. A stream stays live as long as
+  something touches it at least once every ~30 days. The extension only
+  persists when the call is submitted as a transaction. A simulated read (the
+  default for view calls from the CLI or RPC `simulateTransaction`) changes
+  nothing on the ledger and does not keep the stream alive.
+- **The instance entry** (`StreamCount`, the id counter) is extended only by
+  `create_stream`. Reads do not extend it, so a contract that is only queried
+  and never receives a new stream will run its instance down after ~30 days.
+- **The durations are approximate.** They assume the nominal five second
+  ledger close time. Slower ledgers make the wall-clock lifetime longer and
+  faster ones make it shorter, so do not plan around the exact figure.
+
+If a stream may sit idle for longer than thirty days, for example a long
+cliff with no withdrawals, have an off-chain job call one of the views
+periodically, or extend the entry's TTL directly with the Stellar CLI
+(`stellar contract extend`).
 ## Verifying a deployment
 
 Anyone can confirm that a live contract was built from this source by comparing

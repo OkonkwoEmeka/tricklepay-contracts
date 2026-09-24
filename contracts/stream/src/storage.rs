@@ -16,13 +16,23 @@ use soroban_sdk::{contracttype, Env};
 
 use crate::types::Stream;
 
-/// Number of ledgers an entry lives before it must be bumped. At the standard
-/// five second close time this is roughly thirty days, which gives active
-/// streams plenty of headroom between touches.
+/// Number of ledgers an entry lives before it must be bumped.
+///
+/// Derived from a target of thirty days at the nominal five second ledger
+/// close time: `30 days * 86_400 s/day / 5 s/ledger = 518_400` ledgers. Close
+/// times drift, so the wall-clock lifetime is approximate; slower ledgers
+/// stretch it and faster ones shorten it. Thirty days covers a monthly payroll
+/// or subscription cycle, so a stream that is touched at least once per cycle
+/// never approaches archival.
 pub(crate) const ENTRY_TTL: u32 = 518_400;
 /// When an accessed entry has fewer than this many ledgers left, extend it
 /// back up to `ENTRY_TTL`. Above this mark an access is a no-op, so an entry
 /// touched often does not pay to be re-extended on every read.
+///
+/// Set to one fifth of `ENTRY_TTL`, `518_400 / 5 = 103_680` ledgers, or about
+/// six days at five seconds per ledger. An entry is therefore re-extended at
+/// most about once every twenty-four days of activity, and never has less than
+/// six days of headroom left after being touched.
 pub(crate) const BUMP_THRESHOLD: u32 = 103_680;
 
 /// Keys for entries the contract keeps in storage.
