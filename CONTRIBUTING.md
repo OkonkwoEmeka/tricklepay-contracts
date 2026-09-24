@@ -47,6 +47,39 @@ CI runs the same checks on every push and pull request. The audit command uses t
 allowlist in `.cargo/audit.toml`; see the
 [Testing section of the README](README.md#testing) for what is ignored and why.
 
+## Commit messages
+
+Start every commit subject with a type prefix, a colon, and a short summary in
+the imperative mood, lowercase, with no trailing period:
+
+```text
+<type>: <summary>
+```
+
+| Type       | Use for                                                        |
+| ---------- | -------------------------------------------------------------- |
+| `feat`     | a new contract behaviour or entry point                        |
+| `fix`      | a bug fix in contract code                                     |
+| `test`     | adding or changing tests only                                  |
+| `docs`     | README, guides, and doc comments                               |
+| `refactor` | a code change that does not alter behaviour                    |
+| `style`    | formatting only (`cargo fmt`)                                  |
+| `build`    | toolchain, `Cargo.toml`, `Makefile`, or build scripts          |
+| `ci`       | CI workflow configuration                                      |
+| `chore`    | maintenance that fits none of the above                        |
+
+For example:
+
+```text
+fix: reject cancel on a completed stream
+test: add withdraw_amount boundary tests
+docs: document the storage lifetime constants
+```
+
+Issues often suggest a commit message. Use it as written when it fits the
+change. Reference the issue in the commit body or the pull request description
+(`Closes #123`), not in the subject.
+
 ## How to open a pull request
 
 1. Create a branch from `main`, named after the issue you are working on
