@@ -185,6 +185,52 @@ example: whatever has accrued is split between the two parties. At
 
 In all cases, cancellation permanently freezes the stream. No further
 vesting occurs after the call.
+
+## Interpreting contract errors
+
+When a call is rejected, the host does not report the variant name. It reports
+a numeric contract error, which the Stellar CLI and RPC responses print as
+`Error(Contract, #N)`. For example, a `withdraw_amount` that asks for more than
+the available balance fails with:
+
+```text
+HostError: Error(Contract, #8)
+```
+
+`N` is the `u32` discriminant of a `StreamError` variant in
+[`error.rs`](contracts/stream/src/error.rs). The codes are stable across builds,
+so callers and indexers can match on the number directly:
+
+| Code | Variant                  | Returned by                                    | Meaning                                                                          |
+| ---- | ------------------------ | ---------------------------------------------- | -------------------------------------------------------------------------------- |
+| 1    | `StreamNotFound`         | every entry point that takes an `id`           | no stream exists with that id                                                    |
+| 3    | `InvalidTimeRange`       | `create_stream`                                | `start_time` is not strictly before `end_time`                                   |
+| 4    | `InvalidAmount`          | `create_stream`, `withdraw_amount`             | the amount is zero or negative                                                   |
+| 5    | `InvalidCliff`           | `create_stream`                                | `cliff_time` is outside `[start_time, end_time]`                                 |
+| 6    | `AlreadyCancelled`       | `cancel`                                       | the stream has already been cancelled                                            |
+| 7    | `NothingToWithdraw`      | `withdraw`                                     | nothing is withdrawable right now                                                |
+| 8    | `InsufficientBalance`    | `withdraw_amount`                              | the requested amount exceeds the withdrawable balance                            |
+| 9    | `StreamAlreadyCompleted` | `cancel`                                       | `now >= end_time`, so there is nothing unvested to refund                        |
+| 10   | `AmountTooLarge`         | `create_stream`                                | `total_amount` exceeds `MAX_AMOUNT` (`i64::MAX`)                                 |
+| 11   | `StreamWindowInPast`     | `create_stream`                                | `end_time` is not in the future                                                  |
+| 12   | `StreamCountExhausted`   | `create_stream`                                | the id counter has reached `u64::MAX`                                            |
+| 13   | `InvalidParticipant`     | `create_stream`                                | sender equals recipient, or the contract or token address is used as a participant |
+
+Code 2 is not in use. It belonged to a retired `Unauthorized` variant and will
+not be reassigned, so the gap is intentional.
+
+Authorization failures never appear as a contract error. Access control uses
+`require_auth()`, which aborts the call with a host auth error
+(`Error(Auth, ...)`) instead of returning a `StreamError`. If you see an `Auth`
+error rather than a `Contract` one, the call was not signed by the address the
+entry point requires, and none of the codes above apply. Entry points that take
+an `id` look the stream up before checking authorization, so an unknown id
+reports `StreamNotFound` (1) even when the call is also unsigned.
+
+When `create_stream` has several invalid arguments at once, it reports only the
+first failing check, in the order documented on `create_stream` in
+[`contract.rs`](contracts/stream/src/contract.rs): participants, then amount,
+then schedule, then capacity.
 ## Verifying a deployment
 
 Anyone can confirm that a live contract was built from this source by comparing
