@@ -3136,3 +3136,212 @@ fn test_third_party_cannot_mutate_streams() {
         "cancel must not accept third party auth"
     );
 }
+
+/// Issue #253 — Test a withdrawal of a single base unit.
+///
+/// The smallest possible partial withdrawal (amount == 1) exercises the
+/// boundary where integer rounding is most likely to drop or double-count
+/// tokens. A stream of 1 000 units over 1 000 seconds vests exactly one unit
+/// per second, so moving the clock one second past start yields a withdrawable
+/// balance of precisely 1. The withdrawal must succeed, transfer that single
+/// unit to the recipient, and advance the stored `withdrawn` field by exactly
+/// one.
+#[test]
+fn test_withdraw_single_base_unit() {
+    // 1 000-unit stream over [100, 1100] — 1 unit vests per second.
+    let t = StreamTest::setup(1_000);
+    t.set_time(100);
+    let id = t.contract.create_stream(
+        &t.sender,
+        &t.recipient,
+        &t.token_address,
+        &1_000,
+        &100,
+        &1_100,
+        &100,
+    );
+
+    // One second past start: exactly 1 unit has vested (1000 * 1 / 1000).
+    t.set_time(101);
+    assert_eq!(t.contract.withdrawable(&id), 1);
+
+    // Withdraw the single unit via withdraw_amount.
+    let transferred = t.contract.withdraw_amount(&id, &1);
+    assert_eq!(transferred, 1);
+
+    // The recipient received exactly one unit.
+    assert_eq!(t.token.balance(&t.recipient), 1);
+
+    // The contract holds the remaining 999 units.
+    assert_eq!(t.token.balance(&t.contract.address), 999);
+
+    // The stored withdrawn counter increased by exactly one.
+    assert_eq!(t.contract.get_stream(&id).withdrawn, 1);
+
+    // Nothing further is withdrawable at the same timestamp.
+    assert_eq!(t.contract.withdrawable(&id), 0);
+}
+
+/// Issue #252 — Test that view functions do not modify stored state.
+///
+/// Every read-only entry point loads a stream from storage but must never
+/// write back to it. This test snapshots the stored stream before calling
+/// every view, calls each one, and asserts the snapshot is byte-for-byte
+/// identical afterwards.
+#[test]
+fn test_view_functions_do_not_modify_stored_state() {
+    let t = StreamTest::setup(1_000);
+    t.set_time(100);
+
+    // Active stream: start=100, end=1100, cliff=400 (a real cliff so all
+    // fields are non-trivial).
+    let id = t.contract.create_stream(
+        &t.sender,
+        &t.recipient,
+        &t.token_address,
+        &1_000,
+        &100,
+        &1_100,
+        &400,
+    );
+
+    // Advance into the active vesting window past the cliff.
+    t.set_time(600);
+
+    // Snapshot the stored stream before any view call.
+    let before = t.contract.get_stream(&id);
+
+    // Call every view entry point.
+    let _ = t.contract.get_stream(&id);
+    let _ = t.contract.withdrawable(&id);
+    let _ = t.contract.vested(&id);
+    let _ = t.contract.locked(&id);
+    let _ = t.contract.progress(&id);
+    let _ = t.contract.status(&id);
+    let _ = t.contract.stream_count();
+
+    // The stored stream must be identical to the snapshot.
+    let after = t.contract.get_stream(&id);
+    assert_eq!(
+        after, before,
+        "a view call must not modify the stored stream"
+    );
+
+    // Spot-check individual fields to make any diff obvious on failure.
+    assert_eq!(after.withdrawn, before.withdrawn);
+    assert_eq!(after.total_amount, before.total_amount);
+    assert_eq!(after.start_time, before.start_time);
+    assert_eq!(after.cliff_time, before.cliff_time);
+    assert_eq!(after.end_time, before.end_time);
+    assert_eq!(after.cancelled, before.cancelled);
+}
+
+/// Issue #254 — Test that withdrawing leaves the schedule untouched.
+///
+/// A withdrawal updates only the `withdrawn` counter. The schedule fields
+/// (`start_time`, `cliff_time`, `end_time`) and `total_amount` must survive
+/// completely unchanged, because every subsequent vesting calculation depends
+/// on them.
+#[test]
+fn test_withdrawal_leaves_schedule_untouched() {
+    let t = StreamTest::setup(1_000);
+    t.set_time(100);
+
+    // Stream with a real cliff so all schedule fields are distinct.
+    let id = t.contract.create_stream(
+        &t.sender,
+        &t.recipient,
+        &t.token_address,
+        &1_000,
+        &100,
+        &1_100,
+        &400,
+    );
+
+    // Record the schedule before any withdrawal.
+    let before = t.contract.get_stream(&id);
+
+    // Advance past the cliff and make a partial withdrawal.
+    t.set_time(600);
+    assert_eq!(t.contract.withdraw(&id), 500);
+
+    let after = t.contract.get_stream(&id);
+
+    // Only `withdrawn` should have changed.
+    assert_eq!(after.withdrawn, 500);
+
+    // Total amount is unchanged.
+    assert_eq!(after.total_amount, before.total_amount);
+
+    // Schedule fields are untouched.
+    assert_eq!(after.start_time, before.start_time);
+    assert_eq!(after.cliff_time, before.cliff_time);
+    assert_eq!(after.end_time, before.end_time);
+
+    // Other identity fields are untouched.
+    assert_eq!(after.sender, before.sender);
+    assert_eq!(after.recipient, before.recipient);
+    assert_eq!(after.token, before.token);
+    assert_eq!(after.cancelled, before.cancelled);
+
+    // A second partial withdrawal via withdraw_amount also leaves the
+    // schedule alone.
+    t.set_time(850);
+    assert_eq!(t.contract.withdraw_amount(&id, &100), 100);
+
+    let after2 = t.contract.get_stream(&id);
+    assert_eq!(after2.withdrawn, 600);
+    assert_eq!(after2.total_amount, before.total_amount);
+    assert_eq!(after2.start_time, before.start_time);
+    assert_eq!(after2.cliff_time, before.cliff_time);
+    assert_eq!(after2.end_time, before.end_time);
+}
+
+/// Issue #255 — Test a cliff set at the end of the stream.
+///
+/// When `cliff_time == end_time` the stream is a pure lockup: nothing vests
+/// until the final moment, at which point the full amount becomes available
+/// all at once. This is a legal schedule that is easy to get wrong at the
+/// cliff/end boundary.
+#[test]
+fn test_cliff_at_end_of_stream() {
+    let t = StreamTest::setup(1_000);
+    t.set_time(100);
+
+    // cliff_time == end_time: nothing unlocks until the very last second.
+    let id = t.contract.create_stream(
+        &t.sender,
+        &t.recipient,
+        &t.token_address,
+        &1_000,
+        &100,   // start_time
+        &1_100, // end_time
+        &1_100, // cliff_time == end_time
+    );
+
+    // Well into the vesting window but before the cliff: nothing is available.
+    t.set_time(400);
+    assert_eq!(t.contract.withdrawable(&id), 0);
+    assert_eq!(
+        t.contract.try_withdraw(&id),
+        Err(Ok(StreamError::NothingToWithdraw))
+    );
+
+    // One second before the end: still nothing (cliff not yet reached).
+    t.set_time(1_099);
+    assert_eq!(t.contract.withdrawable(&id), 0);
+    assert_eq!(
+        t.contract.try_withdraw(&id),
+        Err(Ok(StreamError::NothingToWithdraw))
+    );
+
+    // At end_time the cliff is reached and the full amount vests at once.
+    t.set_time(1_100);
+    assert_eq!(t.contract.withdrawable(&id), 1_000);
+
+    let withdrawn = t.contract.withdraw(&id);
+    assert_eq!(withdrawn, 1_000);
+    assert_eq!(t.token.balance(&t.recipient), 1_000);
+    assert_eq!(t.token.balance(&t.contract.address), 0);
+    assert_eq!(t.contract.get_stream(&id).withdrawn, 1_000);
+}
