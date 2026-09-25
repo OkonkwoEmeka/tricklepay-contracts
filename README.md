@@ -456,6 +456,49 @@ the persistent-entry and instance time-to-live bumps on both sides of
 
 `scripts/deploy.sh` wraps the Stellar CLI to build, install, and deploy the
 contract. It expects a funded identity configured with `stellar keys`.
+
+The script takes one required argument, the name of a Stellar CLI identity.
+The network is optional. It defaults to `testnet` and is chosen with the
+`NETWORK` environment variable, not a second argument. Run it from the
+repository root, because the WASM path is relative:
+
+```bash
+# One-time setup: create an identity and fund it from friendbot.
+stellar keys generate alice --network testnet --fund
+
+# Deploy to testnet (the default).
+./scripts/deploy.sh alice
+
+# Deploy to another network configured in the Stellar CLI.
+NETWORK=futurenet ./scripts/deploy.sh alice
+
+# The same testnet deploy through make.
+make deploy ID=alice
+```
+
+Running it without an identity prints the usage line and exits with status 1:
+
+```text
+usage: ./scripts/deploy.sh <identity-name>
+```
+
+On success the script prints its two progress lines, then the `cargo build`
+output, then whatever the Stellar CLI logs while it uploads the WASM and
+creates the contract. The last line on stdout is the new contract's address:
+
+```text
+Building optimized WASM...
+   Compiling tricklepay-stream v... (...)
+    Finished `release` profile [optimized] target(s) in ...
+Deploying to testnet as 'alice'...
+... (Stellar CLI transaction logs) ...
+C...  (56-character contract address)
+```
+
+Save that `C...` address. It is the `<CONTRACT_ID>` you pass to every later
+`stellar contract invoke` and to the verification steps in
+[Verifying a deployment](#verifying-a-deployment). The script exits non-zero,
+without deploying, if the build fails or the identity is unknown or unfunded.
 ### Step 2 — fetch the on-chain bytecode hash
 
 Every contract uploaded to a Stellar network is stored as a Wasm entry keyed

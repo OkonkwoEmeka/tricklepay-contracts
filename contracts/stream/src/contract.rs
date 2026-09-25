@@ -59,6 +59,20 @@ impl StreamContract {
     ///    wrapping to zero or reusing any previously assigned stream id.
     ///
     /// Only once all five pass are tokens transferred and the stream stored.
+    ///
+    /// # Examples
+    ///
+    /// ```ignore
+    /// let id = client.create_stream(
+    ///     &sender,
+    ///     &recipient,
+    ///     &token,
+    ///     &1_000_000_000, // 1000 tokens (7 decimals)
+    ///     &1_700_000_000, // start_time (unix timestamp)
+    ///     &1_700_086_400, // end_time (start + 1 day)
+    ///     &1_700_000_000, // cliff_time (no cliff)
+    /// );
+    /// ```
     // A contract entry point: every field is part of the public call shape,
     // so bundling them into a struct would only obscure the interface.
     // The too-many-arguments threshold is raised to 8 in clippy.toml to
@@ -172,6 +186,12 @@ impl StreamContract {
     /// Only the recipient may call this. The amount sent is whatever has
     /// vested up to the current ledger time minus what was withdrawn before.
     /// Returns the amount transferred.
+    ///
+    /// # Examples
+    ///
+    /// ```ignore
+    /// let amount_withdrawn = client.withdraw(&stream_id);
+    /// ```
     pub fn withdraw(env: Env, id: u64) -> Result<i128, StreamError> {
         let mut stream = storage::get_stream(&env, id).ok_or(StreamError::StreamNotFound)?;
         stream.recipient.require_auth();
@@ -215,6 +235,12 @@ impl StreamContract {
     /// useful for drawing a fixed sum or leaving a buffer in the stream. Fails
     /// if the requested amount exceeds the currently withdrawable balance.
     /// Returns the amount transferred.
+    ///
+    /// # Examples
+    ///
+    /// ```ignore
+    /// let amount_withdrawn = client.withdraw_amount(&stream_id, &250_000_000);
+    /// ```
     pub fn withdraw_amount(env: Env, id: u64, amount: i128) -> Result<i128, StreamError> {
         let mut stream = storage::get_stream(&env, id).ok_or(StreamError::StreamNotFound)?;
         stream.recipient.require_auth();
@@ -261,6 +287,12 @@ impl StreamContract {
     /// ledger time stays claimable by the recipient through [`Self::withdraw`];
     /// the rest is returned to the sender. Once cancelled, no further tokens
     /// vest. Returns the amount refunded to the sender.
+    ///
+    /// # Examples
+    ///
+    /// ```ignore
+    /// let refund_amount = client.cancel(&stream_id);
+    /// ```
     pub fn cancel(env: Env, id: u64) -> Result<i128, StreamError> {
         let mut stream = storage::get_stream(&env, id).ok_or(StreamError::StreamNotFound)?;
         stream.sender.require_auth();
@@ -314,11 +346,24 @@ impl StreamContract {
     }
 
     /// Fetch a stream by id.
+    ///
+    /// # Examples
+    ///
+    /// ```ignore
+    /// let stream = client.get_stream(&stream_id);
+    /// assert_eq!(stream.total_amount, 1_000_000_000);
+    /// ```
     pub fn get_stream(env: Env, id: u64) -> Result<Stream, StreamError> {
         storage::get_stream(&env, id).ok_or(StreamError::StreamNotFound)
     }
 
     /// Amount the recipient can withdraw right now.
+    ///
+    /// # Examples
+    ///
+    /// ```ignore
+    /// let available = client.withdrawable(&stream_id);
+    /// ```
     pub fn withdrawable(env: Env, id: u64) -> Result<i128, StreamError> {
         let stream = storage::get_stream(&env, id).ok_or(StreamError::StreamNotFound)?;
         let vested = vesting::vested_amount(
@@ -332,6 +377,12 @@ impl StreamContract {
     }
 
     /// Total amount vested so far, including anything already withdrawn.
+    ///
+    /// # Examples
+    ///
+    /// ```ignore
+    /// let total_vested = client.vested(&stream_id);
+    /// ```
     pub fn vested(env: Env, id: u64) -> Result<i128, StreamError> {
         let stream = storage::get_stream(&env, id).ok_or(StreamError::StreamNotFound)?;
         Ok(vesting::vested_amount(
@@ -356,6 +407,12 @@ impl StreamContract {
     /// - Returns [`StreamError::StreamNotFound`] if `id` does not exist in storage
     ///   (e.g. an unknown id or an id from a creation call rejected for invalid participants).
     /// - `locked` is a read-only view function: it does not alter state or move tokens.
+    ///
+    /// # Examples
+    ///
+    /// ```ignore
+    /// let remaining_locked = client.locked(&stream_id);
+    /// ```
     pub fn locked(env: Env, id: u64) -> Result<i128, StreamError> {
         let stream = storage::get_stream(&env, id).ok_or(StreamError::StreamNotFound)?;
         let vested = vesting::vested_amount(
@@ -382,6 +439,12 @@ impl StreamContract {
     /// - Returns [`StreamError::StreamNotFound`] if `id` does not exist in storage
     ///   (e.g. an unknown id or an id from a creation call rejected due to invalid participants).
     /// - `progress` is a read-only view function: it does not alter state or move tokens.
+    ///
+    /// # Examples
+    ///
+    /// ```ignore
+    /// let bps = client.progress(&stream_id); // e.g. 5000 for 50%
+    /// ```
     pub fn progress(env: Env, id: u64) -> Result<u32, StreamError> {
         let stream = storage::get_stream(&env, id).ok_or(StreamError::StreamNotFound)?;
         if stream.total_amount == 0 {
@@ -411,6 +474,13 @@ impl StreamContract {
     ///   (e.g. an unknown id, or an id from a creation attempt rejected for invalid
     ///   participants like the contract's own address).
     /// - `status` is a read-only view function: it does not alter contract state or move tokens.
+    ///
+    /// # Examples
+    ///
+    /// ```ignore
+    /// let current_status = client.status(&stream_id);
+    /// assert_eq!(current_status, StreamStatus::Streaming);
+    /// ```
     pub fn status(env: Env, id: u64) -> Result<StreamStatus, StreamError> {
         let stream = storage::get_stream(&env, id).ok_or(StreamError::StreamNotFound)?;
         if stream.cancelled {
@@ -429,6 +499,12 @@ impl StreamContract {
 
     /// Number of streams created so far. Ids run from zero up to this value
     /// minus one.
+    ///
+    /// # Examples
+    ///
+    /// ```ignore
+    /// let count = client.stream_count();
+    /// ```
     pub fn stream_count(env: Env) -> u64 {
         storage::stream_count(&env)
     }
