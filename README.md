@@ -185,6 +185,93 @@ example: whatever has accrued is split between the two parties. At
 
 In all cases, cancellation permanently freezes the stream. No further
 vesting occurs after the call.
+
+## Interpreting contract errors
+
+When a call is rejected, the host does not report the variant name. It reports
+a numeric contract error, which the Stellar CLI and RPC responses print as
+`Error(Contract, #N)`. For example, a `withdraw_amount` that asks for more than
+the available balance fails with:
+
+```text
+HostError: Error(Contract, #8)
+```
+
+`N` is the `u32` discriminant of a `StreamError` variant in
+[`error.rs`](contracts/stream/src/error.rs). The codes are stable across builds,
+so callers and indexers can match on the number directly:
+
+| Code | Variant                  | Returned by                                    | Meaning                                                                          |
+| ---- | ------------------------ | ---------------------------------------------- | -------------------------------------------------------------------------------- |
+| 1    | `StreamNotFound`         | every entry point that takes an `id`           | no stream exists with that id                                                    |
+| 3    | `InvalidTimeRange`       | `create_stream`                                | `start_time` is not strictly before `end_time`                                   |
+| 4    | `InvalidAmount`          | `create_stream`, `withdraw_amount`             | the amount is zero or negative                                                   |
+| 5    | `InvalidCliff`           | `create_stream`                                | `cliff_time` is outside `[start_time, end_time]`                                 |
+| 6    | `AlreadyCancelled`       | `cancel`                                       | the stream has already been cancelled                                            |
+| 7    | `NothingToWithdraw`      | `withdraw`                                     | nothing is withdrawable right now                                                |
+| 8    | `InsufficientBalance`    | `withdraw_amount`                              | the requested amount exceeds the withdrawable balance                            |
+| 9    | `StreamAlreadyCompleted` | `cancel`                                       | `now >= end_time`, so there is nothing unvested to refund                        |
+| 10   | `AmountTooLarge`         | `create_stream`                                | `total_amount` exceeds `MAX_AMOUNT` (`i64::MAX`)                                 |
+| 11   | `StreamWindowInPast`     | `create_stream`                                | `end_time` is not in the future                                                  |
+| 12   | `StreamCountExhausted`   | `create_stream`                                | the id counter has reached `u64::MAX`                                            |
+| 13   | `InvalidParticipant`     | `create_stream`                                | sender equals recipient, or the contract or token address is used as a participant |
+
+Code 2 is not in use. It belonged to a retired `Unauthorized` variant and will
+not be reassigned, so the gap is intentional.
+
+Authorization failures never appear as a contract error. Access control uses
+`require_auth()`, which aborts the call with a host auth error
+(`Error(Auth, ...)`) instead of returning a `StreamError`. If you see an `Auth`
+error rather than a `Contract` one, the call was not signed by the address the
+entry point requires, and none of the codes above apply. Entry points that take
+an `id` look the stream up before checking authorization, so an unknown id
+reports `StreamNotFound` (1) even when the call is also unsigned.
+
+When `create_stream` has several invalid arguments at once, it reports only the
+first failing check, in the order documented on `create_stream` in
+[`contract.rs`](contracts/stream/src/contract.rs): participants, then amount,
+then schedule, then capacity.
+
+## Storage lifetime
+
+Soroban storage entries expire unless their time to live (TTL) is extended.
+Once an entry's TTL runs out the network archives it, and it must be restored
+off-contract before any call can read it again. The contract sets two
+constants in [`storage.rs`](contracts/stream/src/storage.rs) that decide how
+long a stream survives without interaction:
+
+| Constant         | Ledgers   | Approx. time at 5 s/ledger | Role                                                    |
+| ---------------- | --------- | -------------------------- | ------------------------------------------------------- |
+| `ENTRY_TTL`      | `518_400` | 30 days                    | the lifetime an entry is extended to                    |
+| `BUMP_THRESHOLD` | `103_680` | 6 days                     | extend only when fewer than this many ledgers remain    |
+
+`ENTRY_TTL` is thirty days expressed in ledgers
+(`30 * 86_400 / 5 = 518_400`), long enough to cover a monthly payroll or
+subscription cycle. `BUMP_THRESHOLD` is one fifth of that. An access with more
+than six days left does not extend the entry, which saves the fee of
+re-extending on every call. An access with less than six days left resets the
+entry to the full thirty days.
+
+What this means in practice:
+
+- **Stream records** (`Stream(id)`, persistent storage) are extended whenever
+  any entry point reads or writes them, including the read-only views such as
+  `withdrawable`, `vested`, and `get_stream`. A stream stays live as long as
+  something touches it at least once every ~30 days. The extension only
+  persists when the call is submitted as a transaction. A simulated read (the
+  default for view calls from the CLI or RPC `simulateTransaction`) changes
+  nothing on the ledger and does not keep the stream alive.
+- **The instance entry** (`StreamCount`, the id counter) is extended only by
+  `create_stream`. Reads do not extend it, so a contract that is only queried
+  and never receives a new stream will run its instance down after ~30 days.
+- **The durations are approximate.** They assume the nominal five second
+  ledger close time. Slower ledgers make the wall-clock lifetime longer and
+  faster ones make it shorter, so do not plan around the exact figure.
+
+If a stream may sit idle for longer than thirty days, for example a long
+cliff with no withdrawals, have an off-chain job call one of the views
+periodically, or extend the entry's TTL directly with the Stellar CLI
+(`stellar contract extend`).
 ## Verifying a deployment
 
 Anyone can confirm that a live contract was built from this source by comparing
@@ -261,6 +348,49 @@ the persistent-entry and instance time-to-live bumps on both sides of
 
 `scripts/deploy.sh` wraps the Stellar CLI to build, install, and deploy the
 contract. It expects a funded identity configured with `stellar keys`.
+
+The script takes one required argument, the name of a Stellar CLI identity.
+The network is optional. It defaults to `testnet` and is chosen with the
+`NETWORK` environment variable, not a second argument. Run it from the
+repository root, because the WASM path is relative:
+
+```bash
+# One-time setup: create an identity and fund it from friendbot.
+stellar keys generate alice --network testnet --fund
+
+# Deploy to testnet (the default).
+./scripts/deploy.sh alice
+
+# Deploy to another network configured in the Stellar CLI.
+NETWORK=futurenet ./scripts/deploy.sh alice
+
+# The same testnet deploy through make.
+make deploy ID=alice
+```
+
+Running it without an identity prints the usage line and exits with status 1:
+
+```text
+usage: ./scripts/deploy.sh <identity-name>
+```
+
+On success the script prints its two progress lines, then the `cargo build`
+output, then whatever the Stellar CLI logs while it uploads the WASM and
+creates the contract. The last line on stdout is the new contract's address:
+
+```text
+Building optimized WASM...
+   Compiling tricklepay-stream v... (...)
+    Finished `release` profile [optimized] target(s) in ...
+Deploying to testnet as 'alice'...
+... (Stellar CLI transaction logs) ...
+C...  (56-character contract address)
+```
+
+Save that `C...` address. It is the `<CONTRACT_ID>` you pass to every later
+`stellar contract invoke` and to the verification steps in
+[Verifying a deployment](#verifying-a-deployment). The script exits non-zero,
+without deploying, if the build fails or the identity is unknown or unfunded.
 ### Step 2 — fetch the on-chain bytecode hash
 
 Every contract uploaded to a Stellar network is stored as a Wasm entry keyed
